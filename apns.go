@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -19,7 +20,7 @@ const (
 	//Notification head size
 	NOTIFICATION_HEAD_SIZE = 1 + 4
 	//write retry number
-	RETRY_NUMBER = 3
+	RETRY_NUMBER = 2
 	//write concurrent number
 	CONCURRENT_NUMBER = 3
 )
@@ -176,8 +177,13 @@ func (a *Apns) sendMessageToApns(msg cacheMessage) {
 	for idx := 0; idx < RETRY_NUMBER; idx++ {
 		if sendLen, err := a.connector.Write(data); err != nil {
 			log.Println("send message failed: ", err, " id ", msg.id)
+
+			if is_timeout(err) {
+				a.connector.Reconnect()
+				continue
+			}
 		} else if sendLen != len(data) {
-			//			log.Println("send whole message failed, send ", sendLen, " full length is ", len(data))
+			log.Println("send whole message failed, send ", sendLen, " full length is ", len(data))
 		} else {
 			//log.Println("send msg succ, id ", msg.id)
 			break
@@ -207,13 +213,19 @@ func is_timeout(err error) bool {
 	return false
 }
 
+func is_closed(err error) bool {
+	if err != nil && strings.Contains(err.Error(), "use of closed network connection") {
+		return true
+	}
+
+	return false
+}
+
 func (a *Apns) errorHadnler() {
 	buffer := make([]byte, ERROR_MESSAGE_LENGTH, ERROR_MESSAGE_LENGTH)
 
 	for {
 		read_len, err := a.connector.Read(buffer)
-
-		//log.Printf("read len %v, err %v", read_len, err)
 
 		if read_len == ERROR_MESSAGE_LENGTH {
 			error_msg := ApnsError{
@@ -222,15 +234,21 @@ func (a *Apns) errorHadnler() {
 			}
 			log.Printf("get an error from apple, error code: %v, message id: %v", error_msg.ErrorCode, error_msg.MessageId)
 
+			a.connector.Reconnect()
+
 			go a.resent(error_msg, true)
+		} else if is_timeout(err) && read_len == 0 {
+			continue
+		} else if is_closed(err) {
+			log.Println("socket closed by write")
+			time.Sleep(time.Second)
+			continue
+		} else {
+			log.Println("apns close without send error code, read length: ", read_len, " error info: ", err)
 
 			a.connector.Reconnect()
-		} else if err != nil && !is_timeout(err) {
-			log.Println("apns close without send error code")
 
 			go a.resent(ApnsError{}, false)
-
-			a.connector.Reconnect()
 		}
 	}
 }
